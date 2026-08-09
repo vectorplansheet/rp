@@ -6898,9 +6898,12 @@ if (speed === 0) {
         e.originalEvent.stopPropagation();
 
         // 🛑 DELETE MODE — видаляємо eppo як звичайний маркер
-        if (deleteMode) {
+if (deleteMode) {
             e.originalEvent.preventDefault();
             if (confirm('Удалить этот объект?')) {
+                if (marker._scenarioFbKey && window._fbNotifyTargetDeleted) {
+                    window._fbNotifyTargetDeleted(marker._scenarioFbKey);
+                }
                 marker.remove();
                 if (marker._kabZone) map.removeLayer(marker._kabZone);
                 if (marker._kabZoneLabel) map.removeLayer(marker._kabZoneLabel);
@@ -6970,6 +6973,9 @@ trailSquares = [];
         if (marker._autoHeadingSquares) { marker._autoHeadingSquares.forEach(s => { try { map.removeLayer(s); } catch(e){} }); marker._autoHeadingSquares = []; }
 
 if (confirm('Удалить этот объект?')) {
+    if (marker._scenarioFbKey && window._fbNotifyTargetDeleted) {
+        window._fbNotifyTargetDeleted(marker._scenarioFbKey);
+    }
     if (!marker._fbSilentRemove && window.fbRemove) {
       window.fbRemove(marker._fbId);
     }
@@ -12021,6 +12027,12 @@ window.allMarkers = window.allMarkers || [];
 const _origPush = window.allMarkers.push.bind(window.allMarkers);
 window.allMarkers.push = function(...args) {
     const result = _origPush(...args);
+    // цель могла быть создана асинхронно (через showSpeedModal/showTargetModal),
+    // поэтому метку вешаем именно тут — в момент реального появления маркера
+    if (window._pendingScenarioFbKey) {
+        args.forEach(function(m) { if (m && typeof m === 'object') m._scenarioFbKey = window._pendingScenarioFbKey; });
+        window._pendingScenarioFbKey = null;
+    }
     if (typeof spreadLabelsEnabled !== 'undefined' && spreadLabelsEnabled) setTimeout(applySpreadLabels, 80);
     return result;
 };
@@ -12301,8 +12313,22 @@ document.addEventListener('click', function(e) {
     messagingSenderId: "303487956762",
     appId: "1:303487956762:web:cff2cf563c45458c4e9ea3"
   };
-  firebase.initializeApp(firebaseConfig);
+firebase.initializeApp(firebaseConfig);
   const db = firebase.database();
+  window._fbTargetsDb = db;
+
+  // публикуем событие удаления цели (для синхронизации с картой ПУ),
+  // и сами подчищаем запись через 10с, чтобы база не разрасталась
+  window._fbNotifyTargetDeleted = function(key) {
+    if (!key) return;
+    try {
+      const ref = db.ref('targetDeletes/' + key);
+      ref.set(Date.now());
+      setTimeout(function() { ref.remove().catch(function() {}); }, 10000);
+    } catch (e) {
+      console.error('[targetDeletes]', e);
+    }
+  };
 
   // слушаем только записи, добавленные ПОСЛЕ открытия страницы,
   // чтобы при перезагрузке не проигрывались все цели заново
@@ -12332,11 +12358,12 @@ document.addEventListener('click', function(e) {
       ? t.route.map(function(pt) { return [Number(pt[0]), Number(pt[1])]; })
       : null;
 
-    setTimeout(function() {
+setTimeout(function() {
       window.connectionUnlocked = true;
       window._scenarioMode  = true;
       window._scenarioSpeed = speed;
       window._scenarioRoute = route;
+      window._pendingScenarioFbKey = snapshot.key;
 
       map.fire('click', { latlng: L.latLng(spawnLat, spawnLng), simulated: true });
 
@@ -12346,7 +12373,7 @@ document.addEventListener('click', function(e) {
       // ====== ТРИГГЕРЫ ======
       if (!Array.isArray(t.triggers) || t.triggers.length === 0) return;
 
-      t.triggers.forEach(function(trig) {
+      t.triggers.forEach(function(trig, trigIdx) {
         var trigWpIndex = Number(trig.wpIndex) || 0;
         var trigSpeed   = Number(trig.speed)   || 450;
         var trigDelay   = Number(trig.delay)   || 12;
@@ -12366,11 +12393,12 @@ document.addEventListener('click', function(e) {
         var timeToWpMs  = planeSpeedMs > 0 ? (distM / planeSpeedMs) * 1000 : 0;
         var trigTotalMs = timeToWpMs + trigDelay * 1000;
 
-        setTimeout(function() {
+setTimeout(function() {
           try {
             window._scenarioMode  = true;
             window._scenarioSpeed = trigSpeed;
             window._scenarioRoute = trigRoute.map(function(pt) { return [Number(pt[0]), Number(pt[1])]; });
+            window._pendingScenarioFbKey = snapshot.key + '_trig' + trigIdx;
             map.fire('click', {
               latlng: L.latLng(Number(trigSpawn[0]), Number(trigSpawn[1])),
               simulated: true
