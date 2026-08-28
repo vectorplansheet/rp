@@ -5112,6 +5112,7 @@ let activeTargetLine = null;    // текущая красная линия
 let lastVisualUpdate = 0;
 const VISUAL_INTERVAL = 7000; // 7 сек (можешь 5000–10000)
 let waypoints = [];
+let waypointSpeeds = []; // 🎚️ скорость (км/ч) для полёта К соответствующему вайпоинту; null = не менять текущую
 let currentWaypointIndex = 0;
 let shiftedClasss = 0;
 
@@ -5608,10 +5609,15 @@ function addSpeedCircle(marker, speed) {
 
     let color = null;
 
-    if (speed > 3000) {
-        color = "#ff4d00";
-    } else if (speed >= 1100) {
-        color = "#ffea69";
+    if (speed >= 1200) {
+        const minSpeed = 1200, maxSpeed = 5000;
+        const c1 = [0xff, 0xea, 0x69]; // ffea69 — минимум (от 1200 км/ч)
+        const c2 = [0xff, 0x4d, 0x00]; // ff4d00 — максимум (от 5000 км/ч и выше)
+        const t = Math.max(0, Math.min(1, (speed - minSpeed) / (maxSpeed - minSpeed)));
+        const r = Math.round(c1[0] + (c2[0] - c1[0]) * t);
+        const g = Math.round(c1[1] + (c2[1] - c1[1]) * t);
+        const b = Math.round(c1[2] + (c2[2] - c1[2]) * t);
+        color = `rgb(${r}, ${g}, ${b})`;
     } else {
         return null;
     }
@@ -6002,7 +6008,10 @@ function shouldAutoTrail(marker, speed) {
 
     if (html.includes('blue-id')) return false;
 
-    return speed > 3000;
+    // 🚀 скоростные цели (>2000 км/ч) теперь летят к своей точке ОБЫЧНО,
+    // без пунктира — пунктир включается только после достижения цели
+    // (см. ghost-пролёт в updatePosition).
+    return false;
 }
 
 
@@ -7481,6 +7490,9 @@ function updatePosition(timestamp) {
 
     if (stepDistance >= distance || distance <= 0.00001) {
 
+        const _arrivalPrevLat = currentLat;
+        const _arrivalPrevLng = currentLng;
+
         currentLat = targetLatVar;
         currentLng = targetLngVar;
         currentWaypointIndex++;
@@ -7490,9 +7502,60 @@ marker._remainingWaypoints = waypoints.slice(currentWaypointIndex - 1);
             const nextWp = waypoints[currentWaypointIndex];
             targetLatVar = nextWp[0];
             targetLngVar = nextWp[1];
+
+            // 🎚️ если у этого вайпоинта задана своя скорость — применяем её
+            const wSpeed = waypointSpeeds[currentWaypointIndex];
+            if (wSpeed != null && wSpeed !== marker._speed) {
+                speed = wSpeed;
+                marker._speed = wSpeed;
+                marker.speed = wSpeed;
+
+                // обновляем круг скорости и линию курса под новую скорость
+                if (marker._speedCircle) {
+                    map.removeLayer(marker._speedCircle);
+                    marker._speedCircle = null;
+                }
+                if (marker._autoHeadingLine) { map.removeLayer(marker._autoHeadingLine); marker._autoHeadingLine = null; }
+                if (marker._autoHeadingSquares) { marker._autoHeadingSquares.forEach(s => { try { map.removeLayer(s); } catch(e){} }); marker._autoHeadingSquares = []; }
+                marker._speedCircle = addSpeedCircle(marker, wSpeed);
+
+                // синхронизируем метаданные скорости с control-панелью через Firebase
+                if (window.fbUpdate && marker._fbId) {
+                    window.fbUpdate(marker._fbId, { speed: wSpeed });
+                }
+            }
+
             // Если экстраполяция активна — физику считаем, но маркер не двигаем
     scheduleNextFrame(updatePosition);
         } else {
+
+            // 🚀 GHOST-ПРОЛЁТ для скоростных целей (>2000 км/ч):
+            // цель не исчезает сразу по достижении точки, а продолжает лететь
+            // тем же курсом ещё случайные 30–60 км пунктирной линией,
+            // и только потом пропадает (вместе с пунктиром).
+            if (!marker._ghostExtended && (marker._speed || speed) > 2000) {
+                marker._ghostExtended = true;
+
+                const bearingDeg = getAzimuth(_arrivalPrevLat, _arrivalPrevLng, targetLatVar, targetLngVar);
+                const extraKm = 30 + Math.random() * 30; // рандом 30–60 км
+                const ghostPoint = destinationPoint({ lat: targetLatVar, lng: targetLngVar }, bearingDeg, extraKm);
+
+                // включаем пунктирный след начиная с точки достижения цели
+                // (круг скорости остаётся — не убираем его здесь)
+                autoDashedTrail = true;
+                showTrail = true;
+                trailCoords = [[currentLat, currentLng]];
+                trailDistance = 0;
+                createTrail(marker, getTrailColorById(marker), false, true);
+
+                waypoints.push([ghostPoint.lat, ghostPoint.lng]);
+                targetLatVar = ghostPoint.lat;
+                targetLngVar = ghostPoint.lng;
+
+                scheduleNextFrame(updatePosition);
+                return;
+            }
+
             isActive = false;
 
             forceDisableTrail();
@@ -7848,16 +7911,29 @@ const prevLng = currentLng;
 
 // СБРОС и формирование waypoints
 waypoints = [];
+waypointSpeeds = [];
 
 // Если мы в scenario-mode и загрузчик передал весь маршрут — используем его
 if (window._scenarioMode && Array.isArray(window._scenarioRoute) && window._scenarioRoute.length > 0) {
     // копируем все точки маршрута
     window._scenarioRoute.forEach(pt => {
         waypoints.push([Number(pt[0]), Number(pt[1])]);
+        // 🎚️ 3-й элемент точки — скорость (км/ч) для полёта к этой точке (задаётся в panel.html).
+        // Если не задана/некорректна — null, значит скорость не меняется на этом вайпоинте.
+        const wSpeed = Number(pt[2]);
+        waypointSpeeds.push(isFinite(wSpeed) && wSpeed > 0 ? wSpeed : null);
     });
 } else {
     // обычный ручной режим (одна точка, как раньше)
     waypoints.push([targetLat, targetLng]);
+    waypointSpeeds.push(null);
+}
+
+// 🎚️ если у самого первого вайпоинта задана своя скорость — применяем её сразу,
+// до начала движения (переопределяет спавн-скорость).
+if (waypointSpeeds[0] != null) {
+    speed = waypointSpeeds[0];
+    marker._speed = speed;
 }
 
 // инициализация индекса/целей для updatePosition
@@ -11693,7 +11769,7 @@ if (window.fbPublishScheduled) {
       spawnLat:      Number(t.spawn[0]),
       spawnLng:      Number(t.spawn[1]),
       speed:         Number(t.speed) || 0,
-      route:         Array.isArray(t.route) ? t.route.map(pt => [Number(pt[0]), Number(pt[1])]) : [],
+      route:         Array.isArray(t.route) ? t.route.map(pt => [Number(pt[0]), Number(pt[1]), Number(pt[2]) || 0]) : [],
       scheduledTime: Date.now() + Math.max(0, (Number(t.spawnDelay) || 0) * 1000)
     }));
   window.fbPublishScheduled(scheduledTargets);
@@ -11714,7 +11790,7 @@ setTimeout(() => {
           try {
             window._scenarioMode = true;
             window._scenarioSpeed = speed;
-            window._scenarioRoute = Array.isArray(t.route) ? t.route.map(pt => [Number(pt[0]), Number(pt[1])]) : null;
+            window._scenarioRoute = Array.isArray(t.route) ? t.route.map(pt => [Number(pt[0]), Number(pt[1]), Number(pt[2]) || 0]) : null;
 
             Llog('Spawning at', spawnLat, spawnLng, 'speed', speed, 'delayMs', delayMs);
 
@@ -12355,7 +12431,7 @@ firebase.initializeApp(firebaseConfig);
     if (!isFinite(spawnLat) || !isFinite(spawnLng)) return;
 
     const route = Array.isArray(t.route)
-      ? t.route.map(function(pt) { return [Number(pt[0]), Number(pt[1])]; })
+      ? t.route.map(function(pt) { return [Number(pt[0]), Number(pt[1]), Number(pt[2]) || 0]; })
       : null;
 
 setTimeout(function() {
