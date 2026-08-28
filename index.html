@@ -6021,6 +6021,13 @@ function shouldAutoTrail(marker, speed) {
 
 function createTrail(marker, forcedColor = null, withStartPoint = true, dashed = false) {
 
+    // ⚠️ ФИКС БАГА: подстраховка на уровне самой функции — если trailLine уже
+    // существует (осталась от предыдущего вызова), убираем её с карты перед
+    // тем как перезаписать переменную новым полилайном, иначе старая линия
+    // "теряется" и остаётся висеть на карте навсегда.
+    if (trailLine) { map.removeLayer(trailLine); trailLine = null; }
+    if (startMarker) { map.removeLayer(startMarker); startMarker = null; }
+
     const lineColor = forcedColor || getLineColor(marker);
 
     // 🔥 сглаживание ОДИН РАЗ
@@ -7539,6 +7546,15 @@ marker._remainingWaypoints = waypoints.slice(currentWaypointIndex - 1);
                 const bearingDeg = getAzimuth(_arrivalPrevLat, _arrivalPrevLng, targetLatVar, targetLngVar);
                 const extraKm = 30 + Math.random() * 30; // рандом 30–60 км
                 const ghostPoint = destinationPoint({ lat: targetLatVar, lng: targetLngVar }, bearingDeg, extraKm);
+
+                // ⚠️ ФИКС БАГА: убираем старую (сплошную) линию пройденного маршрута
+                // с карты, иначе createTrail() ниже перезапишет переменную trailLine
+                // новым (пунктирным) полилайном, а старый останется висеть на карте
+                // "осиротевшим" и не удалится даже при удалении цели.
+                if (trailLine) { map.removeLayer(trailLine); trailLine = null; }
+                if (startMarker) { map.removeLayer(startMarker); startMarker = null; }
+                trailSquares.forEach(s => { try { map.removeLayer(s); } catch(e){} });
+                trailSquares.length = 0;
 
                 // включаем пунктирный след начиная с точки достижения цели
                 // (круг скорости остаётся — не убираем его здесь)
