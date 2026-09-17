@@ -5294,6 +5294,12 @@ if (speed >= 120 && speed <= 121) {
         iconUrl = 'merlin.svg';
     } else if (speed >= 310 && speed <= 315) {
         iconUrl = 'an-22.svg';
+    } else if (speed >= 440 && speed <= 441) {
+        iconUrl = 'saab.svg';
+        iconClass = 'blue-id';  
+    } else if (speed >= 805 && speed <= 806) {
+        iconUrl = 'mig-29 SV.svg';
+        iconClass = 'blue-id';  
     } else {
         // Если скорость не попала ни в одно условие, ставим "neyst tip.png"
         iconUrl = 'neyst tip.svg';
@@ -5568,7 +5574,8 @@ if (iconUrl === 'litak.svg') {
 } else if (iconClass === 'blue-id' || iconClass === 'vertolet') {
 
     objectIdLocal = objectId2;
-    iconUrl = iconClass === 'blue-id' ? 'blue.svg' : iconUrl;
+    const _keepOwnIcon = (iconUrl === 'saab.svg' || iconUrl === 'mig-29 SV.svg');
+    iconUrl = (iconClass === 'blue-id' && !_keepOwnIcon) ? 'blue.svg' : iconUrl;
     iconClass = 'blue-id';
     labelText = 'СВ·';
 
