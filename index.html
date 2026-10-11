@@ -4983,6 +4983,7 @@ function getRandomVisualIntervalBySpeed(speed) {
     if (speed > 3000)      base = 3000;
     else if (speed > 2000) base = 7000;
     else if (speed > 800)  base = 12000;
+    else if (speed >= 400 && speed <= 700) base = 8000; // 🚀 цели 400–700 км/ч обновляются чаще
     else                   base = 20000;
 
     const now = performance.now();
@@ -5112,6 +5113,7 @@ let activeTargetLine = null;    // текущая красная линия
 let lastVisualUpdate = 0;
 const VISUAL_INTERVAL = 7000; // 7 сек (можешь 5000–10000)
 let waypoints = [];
+let waypointHeights = []; // 🏔️ высота (м) для вайпоинта (4-й элемент точки из panel.html); null = не менять
 let waypointSpeeds = []; // 🎚️ скорость (км/ч) для полёта К соответствующему вайпоинту; null = не менять текущую
 let currentWaypointIndex = 0;
 let shiftedClasss = 0;
@@ -7517,6 +7519,10 @@ marker._remainingWaypoints = waypoints.slice(currentWaypointIndex - 1);
             targetLatVar = nextWp[0];
             targetLngVar = nextWp[1];
 
+            // 🏔️ высота для этой точки (независимо от скорости)
+            // (применится не сразу, а в ближайшем цикле обновления позиции — см. _pendingHeightM)
+            if (waypointHeights[currentWaypointIndex] != null) marker._pendingHeightM = waypointHeights[currentWaypointIndex];
+
             // 🎚️ если у этого вайпоинта задана своя скорость — применяем её
             const wSpeed = waypointSpeeds[currentWaypointIndex];
             if (wSpeed != null && wSpeed !== marker._speed) {
@@ -7532,6 +7538,7 @@ marker._remainingWaypoints = waypoints.slice(currentWaypointIndex - 1);
                 if (marker._autoHeadingLine) { map.removeLayer(marker._autoHeadingLine); marker._autoHeadingLine = null; }
                 if (marker._autoHeadingSquares) { marker._autoHeadingSquares.forEach(s => { try { map.removeLayer(s); } catch(e){} }); marker._autoHeadingSquares = []; }
                 marker._speedCircle = addSpeedCircle(marker, wSpeed);
+                { const _hs = document.getElementById('kab-height-' + marker._objectId); if (_hs) _hs.textContent = (speedInMS ? Math.round(wSpeed / 3.6) + 'm' : wSpeed) + (marker._showHeight ? ' ' + Math.round(marker._height ?? 0) : ''); }
 
                 // синхронизируем метаданные скорости с control-панелью через Firebase
                 if (window.fbUpdate && marker._fbId) {
@@ -7648,6 +7655,11 @@ if (now - marker._lastVisualUpdate >= marker._nextVisualInterval) {
 
     rotateIcon(currentLat, currentLng, targetLatVar, targetLngVar, speed);
     marker.setLatLng([currentLat, currentLng]);
+    // 🏔️ высота обновляется только здесь — в цикле обновления местоположения цели
+    if (marker._pendingHeightM != null && marker._applyWaypointHeight) {
+        marker._applyWaypointHeight(marker._pendingHeightM);
+        marker._pendingHeightM = null;
+    }
 // ── Зберігаємо позицію в Firebase раз на 5 секунд ──
 if (!marker._lastPosUpdate || now - marker._lastPosUpdate >= 5000) {
     marker._lastPosUpdate = now;
@@ -7935,6 +7947,7 @@ const prevLng = currentLng;
 // СБРОС и формирование waypoints
 waypoints = [];
 waypointSpeeds = [];
+waypointHeights = [];
 
 // Если мы в scenario-mode и загрузчик передал весь маршрут — используем его
 if (window._scenarioMode && Array.isArray(window._scenarioRoute) && window._scenarioRoute.length > 0) {
@@ -7945,11 +7958,15 @@ if (window._scenarioMode && Array.isArray(window._scenarioRoute) && window._scen
         // Если не задана/некорректна — null, значит скорость не меняется на этом вайпоинте.
         const wSpeed = Number(pt[2]);
         waypointSpeeds.push(isFinite(wSpeed) && wSpeed > 0 ? wSpeed : null);
+        // 🏔️ 4-й элемент — высота (м) для этой точки; 0/пусто = не менять
+        const wHeight = Number(pt[3]);
+        waypointHeights.push(isFinite(wHeight) && wHeight > 0 ? wHeight : null);
     });
 } else {
     // обычный ручной режим (одна точка, как раньше)
     waypoints.push([targetLat, targetLng]);
     waypointSpeeds.push(null);
+    waypointHeights.push(null);
 }
 
 // 🎚️ если у самого первого вайпоинта задана своя скорость — применяем её сразу,
@@ -7958,6 +7975,22 @@ if (waypointSpeeds[0] != null) {
     speed = waypointSpeeds[0];
     marker._speed = speed;
 }
+
+// 🏔️ применение высоты вайпоинта: обновляет маркер, подпись на карте и H в верхнем меню
+function applyWaypointHeight(hM) {
+    if (hM == null || marker._kabStartHeight) return; // КАБ имеет свою логику падения
+    marker._height = hM / 100;
+    marker._showHeight = true;
+    const hSpan = document.getElementById('kab-height-' + marker._objectId);
+    if (hSpan) {
+        const spd = speedInMS ? Math.round(marker._speed / 3.6) + 'm' : marker._speed;
+        hSpan.textContent = spd + ' ' + Math.round(marker._height);
+    }
+    const hMenu = document.getElementById('kab-hmenu-' + marker._objectId);
+    if (hMenu) hMenu.textContent = 'H' + Math.round(marker._height) + '.0';
+}
+marker._applyWaypointHeight = applyWaypointHeight;
+applyWaypointHeight(waypointHeights[0]);
 
 // инициализация индекса/целей для updatePosition
 currentWaypointIndex = 0;
@@ -8179,9 +8212,13 @@ function generateHeightByIcon(iconUrl) {
     const t = Math.pow(Math.random(), 2.2); // 👈 смещение вниз
 return min + t * (max - min);
 }
-const heightMeters = window._fbIncomingId
-    ? (window._fbIncomingHeight || null)
-    : generateHeightByIcon(iconUrl);
+// 🏔️ высота из panel.html (первая точка маршрута) имеет приоритет над случайной
+const _panelStartHeight = (typeof waypointHeights !== 'undefined' && waypointHeights.length) ? waypointHeights[0] : null;
+const heightMeters = (_panelStartHeight != null)
+    ? _panelStartHeight
+    : (window._fbIncomingId
+        ? (window._fbIncomingHeight || null)
+        : generateHeightByIcon(iconUrl));
 
 if (heightMeters !== null) {
     marker._height = heightMeters / 100;
@@ -12454,7 +12491,7 @@ firebase.initializeApp(firebaseConfig);
     if (!isFinite(spawnLat) || !isFinite(spawnLng)) return;
 
     const route = Array.isArray(t.route)
-      ? t.route.map(function(pt) { return [Number(pt[0]), Number(pt[1]), Number(pt[2]) || 0]; })
+      ? t.route.map(function(pt) { return [Number(pt[0]), Number(pt[1]), Number(pt[2]) || 0, Number(pt[3]) || 0]; })
       : null;
 
 setTimeout(function() {
