@@ -4991,6 +4991,28 @@ function getRandomVisualIntervalBySpeed(speed) {
     const nextGridTick = Math.ceil(elapsed / base) * base;
     return nextGridTick - elapsed; // без jitter
 }
+// 🕒 ФОНОВЫЙ ТИКЕР: requestAnimationFrame замирает, когда вкладка скрыта или окно перекрыто
+// (Telegram и т.п.), а обычные таймеры браузер душит до 1 раза в секунду/минуту.
+// Из-за этого цели "залипали" и догоняли только при возврате. Таймер в Web Worker
+// в фоне не замедляется — он будит все ожидающие кадры, пока вкладка не видна.
+window._bgFrameQueue = window._bgFrameQueue || new Set();
+(function () {
+    function runBgTick() {
+        if (document.visibilityState === 'visible') return;
+        const now = performance.now();
+        Array.from(window._bgFrameQueue).forEach(function (e) {
+            try { e.run(now); } catch (err) { console.error('[bgTick]', err); }
+        });
+    }
+    try {
+        const blob = new Blob(['setInterval(function(){postMessage(0)},250)'], { type: 'application/javascript' });
+        const w = new Worker(URL.createObjectURL(blob));
+        w.onmessage = runBgTick;
+        window._bgWorker = w;
+    } catch (e) {
+        setInterval(runBgTick, 1000); // запасной вариант, если Worker недоступен
+    }
+})();
 let markersCount = 0;
 var TRAIL_MAX_DISTANCE = 100000;
         // Show modal and handle speed input
@@ -7460,13 +7482,20 @@ function resetTrailSegment() {
 function scheduleNextFrame(callback) {
     if (!isActive) return;
 
+    // кадр можно запустить двумя путями: rAF (вкладка видна) или фоновый тикер (Worker).
+    // Кто успел первым — тот и запускает, второй путь игнорируется.
+    const entry = { done: false, run: null };
+    entry.run = function (ts) {
+        if (entry.done) return;
+        entry.done = true;
+        window._bgFrameQueue.delete(entry);
+        callback(ts);
+    };
+    window._bgFrameQueue.add(entry);
+
     // document.hasFocus() слишком дорогой при 200 целях
     if (document.visibilityState === "visible") {
-        requestAnimationFrame(callback);
-    } else {
-        setTimeout(() => {
-            if (isActive) callback(performance.now());
-        }, 1000);
+        requestAnimationFrame(entry.run);
     }
 }
 
@@ -7660,6 +7689,10 @@ if (now - marker._lastVisualUpdate >= marker._nextVisualInterval) {
         marker._applyWaypointHeight(marker._pendingHeightM);
         marker._pendingHeightM = null;
     }
+    // 🎚️ скорость в верхнем меню тоже обновляем в цикле (раньше менялась только вручную)
+    { const _tm = document.getElementById('top-menu-' + marker._objectId);
+      const _sc = _tm ? _tm.querySelector('.speed-cell') : null;
+      if (_sc) { const _t = formatSpeed(marker); if (_sc.textContent.trim() !== _t) _sc.textContent = _t; } }
 // ── Зберігаємо позицію в Firebase раз на 5 секунд ──
 if (!marker._lastPosUpdate || now - marker._lastPosUpdate >= 5000) {
     marker._lastPosUpdate = now;
